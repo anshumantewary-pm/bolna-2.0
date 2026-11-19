@@ -67,8 +67,26 @@ async def run() -> None:
 
 
 def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="voice-agent", description=__doc__)
+    parser.add_argument(
+        "--voice",
+        action="store_true",
+        help="talk through your microphone and speakers (Deepgram STT + ElevenLabs TTS)",
+    )
+    args = parser.parse_args()
+
+    if args.voice:
+        from .voice import missing_env, run_voice
+
+        if missing := missing_env():
+            sys.exit(f"Voice mode needs these environment variables: {', '.join(missing)}")
+        target = run_voice
+    else:
+        target = run
     try:
-        asyncio.run(run())
+        asyncio.run(target())
     except KeyboardInterrupt:
         pass
     print("bye")

@@ -344,16 +344,18 @@ Buy the commodity layers (telephony, speech, model), build the orchestration, to
 | Web/mobile media | WebRTC SFU | LiveKit (open source or cloud), Daily | Buy / self-host |
 | Pipeline framework | Open-source voice-agent framework to avoid rebuilding audio plumbing | LiveKit Agents, Pipecat | Adopt + extend |
 | VAD / turn detection | Local VAD + semantic turn model | Silero VAD, framework turn detectors | Adopt |
-| STT | Streaming, low-latency, custom vocabulary | Deepgram, AssemblyAI, Speechmatics | Buy |
+| STT | Streaming, low-latency, custom vocabulary | **Chosen: Deepgram `nova-3`** (alternatives: AssemblyAI, Speechmatics) | Buy |
 | LLM | Claude Messages API, streaming + tools + prompt caching | `claude-opus-5-5` (low effort, fast mode); benchmark `claude-sonnet-5-5`, `claude-haiku-5-5` | Buy |
-| TTS | Streaming, natural voice, low first-byte latency | ElevenLabs, Cartesia, Deepgram Aura | Buy |
-| Orchestrator + tool gateway | Python (asyncio) or TypeScript service | — | Build |
+| TTS | Streaming, natural voice, low first-byte latency | **Chosen: ElevenLabs `eleven_flash_v2_5`** (alternatives: Cartesia, Deepgram Aura) | Buy |
+| Orchestrator + tool gateway | Python (asyncio) | — | Build (done in Phase 0) |
 | Data | Postgres + pgvector, Redis, S3-compatible storage | — | Managed services |
 | Infra | Kubernetes in one region near providers, then multi-region | AWS / GCP | Managed |
 | Observability | OpenTelemetry → Grafana / Datadog / Langfuse | — | Buy |
 | Admin console | Next.js + the platform API | — | Build |
 
 **Alternative:** a speech-to-speech realtime model gives lower latency and better prosody but less control over tools, transcripts and swapping vendors. Revisit after v1 if latency targets are missed.
+
+**Evaluated and not chosen (Nov 2026): VocalLabs.** It is a hosted end-to-end agent platform, not a speech vendor: no standalone STT/TTS API, agents run only on its own models (no Claude or custom LLM), and in-call API access is limited to its "actions" feature. Using it would replace the orchestrator rather than plug into it. Possible later use: phone lines only, if its SIP media streaming can feed our server.
 
 **Cost model (per call minute)**
 

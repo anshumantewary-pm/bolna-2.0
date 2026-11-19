@@ -29,6 +29,11 @@ class Settings:
     max_tokens: int = 16000
     filler_after_s: float = 1.0
     tool_timeout_s: float = 3.0
+    # Speech vendors (voice mode).
+    sample_rate: int = 16000
+    deepgram_model: str = "nova-3"
+    elevenlabs_model: str = "eleven_flash_v2_5"
+    elevenlabs_voice_id: str = ""
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -39,4 +44,7 @@ class Settings:
             fallbacks=_flag("VOICE_AGENT_FALLBACKS", cls.fallbacks),
             filler_after_s=_float("VOICE_AGENT_FILLER_AFTER_S", cls.filler_after_s),
             tool_timeout_s=_float("VOICE_AGENT_TOOL_TIMEOUT_S", cls.tool_timeout_s),
+            deepgram_model=os.environ.get("DEEPGRAM_MODEL") or cls.deepgram_model,
+            elevenlabs_model=os.environ.get("ELEVENLABS_MODEL") or cls.elevenlabs_model,
+            elevenlabs_voice_id=os.environ.get("ELEVENLABS_VOICE_ID") or cls.elevenlabs_voice_id,
         )
