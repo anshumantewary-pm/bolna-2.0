@@ -207,7 +207,7 @@ stateDiagram-v2
 ```
 
 - Caller speech detected while Speaking (VAD above threshold for ~150 ms and STT confirms words) → stop playback, cancel the LLM stream and pending TTS, go to Listening.
-- Truncate the assistant message in history to the words actually played, so the model knows what the caller heard.
+- Tell the model what the caller actually heard: keep the assistant message in history unchanged (the API rejects edited history with thinking blocks) and add a mid-conversation system note on the next turn, e.g. "The caller interrupted; they heard only: ...". If the caller interrupts before the model answered at all, drop that unanswered turn and prepend its words to the next utterance.
 - Ignore backchannels ("mm-hm", "yeah") with a short word list plus the turn model, so they don't interrupt.
 - Echo: rely on acoustic echo cancellation on web; on phone lines, gate VAD during the agent's own audio peaks.
 
