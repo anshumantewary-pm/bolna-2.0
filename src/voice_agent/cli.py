@@ -70,19 +70,27 @@ def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(prog="voice-agent", description=__doc__)
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--web",
+        action="store_true",
+        help="serve browser calls at http://localhost:PORT (Deepgram STT + ElevenLabs TTS)",
+    )
+    mode.add_argument(
         "--voice",
         action="store_true",
-        help="talk through your microphone and speakers (Deepgram STT + ElevenLabs TTS)",
+        help="talk through this computer's microphone and speakers (use headphones)",
     )
+    parser.add_argument("--host", default="127.0.0.1", help="web mode bind address")
+    parser.add_argument("--port", type=int, default=8080, help="web mode port")
     args = parser.parse_args()
 
-    if args.voice:
-        from .voice import missing_env, run_voice
+    if args.web or args.voice:
+        from .voice import missing_env, run_voice, run_web
 
         if missing := missing_env():
-            sys.exit(f"Voice mode needs these environment variables: {', '.join(missing)}")
-        target = run_voice
+            sys.exit(f"Voice needs these environment variables: {', '.join(missing)}")
+        target = (lambda: run_web(args.host, args.port)) if args.web else run_voice
     else:
         target = run
     try:

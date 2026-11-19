@@ -44,19 +44,17 @@ async def drive_session(
             await session.on_user_turn(signal.text)
 
 
-async def run_voice() -> None:
-    import anthropic
-
-    from .providers.local_audio import MicInput, SpeakerOutput
-
-    settings = Settings.from_env()
-    if not settings.elevenlabs_voice_id:
-        raise SystemExit("Set ELEVENLABS_VOICE_ID (pick a voice in your ElevenLabs voice library).")
-    stt: SpeechToText = DeepgramSTT(
+def make_stt(settings: Settings) -> DeepgramSTT:
+    return DeepgramSTT(
         os.environ["DEEPGRAM_API_KEY"],
         DeepgramOptions(model=settings.deepgram_model, sample_rate=settings.sample_rate, keyterms=KEYTERMS),
     )
-    tts = ElevenLabsTTS(
+
+
+def make_tts(settings: Settings) -> ElevenLabsTTS:
+    if not settings.elevenlabs_voice_id:
+        raise SystemExit("Set ELEVENLABS_VOICE_ID (pick a voice in your ElevenLabs voice library).")
+    return ElevenLabsTTS(
         os.environ["ELEVENLABS_API_KEY"],
         ElevenLabsOptions(
             voice_id=settings.elevenlabs_voice_id,
@@ -64,6 +62,40 @@ async def run_voice() -> None:
             sample_rate=settings.sample_rate,
         ),
     )
+
+
+async def run_web(host: str, port: int) -> None:
+    """Serve browser calls: open http://localhost:<port> and click Start call."""
+    import anthropic
+
+    from .web import CallDeps, serve_calls
+
+    settings = Settings.from_env()
+    make_tts(settings)  # fail fast on a missing voice ID
+    client = anthropic.AsyncAnthropic()
+    deps = CallDeps(
+        settings=settings,
+        make_agent=lambda: ClaudeAgent(
+            client, ToolRegistry([lookup_order], timeout_s=settings.tool_timeout_s), settings
+        ),
+        make_stt=lambda: make_stt(settings),
+        make_tts=lambda: make_tts(settings),
+    )
+    async with serve_calls(deps, host, port) as server:
+        shown = "localhost" if host in ("127.0.0.1", "0.0.0.0") else host
+        print(f"Open http://{shown}:{port} and click Start call. Ctrl+C to stop.")
+        print(f"STT {settings.deepgram_model} | LLM {settings.model} | TTS {settings.elevenlabs_model}")
+        await server.serve_forever()
+
+
+async def run_voice() -> None:
+    import anthropic
+
+    from .providers.local_audio import MicInput, SpeakerOutput
+
+    settings = Settings.from_env()
+    tts = make_tts(settings)
+    stt: SpeechToText = make_stt(settings)
     speaker = SpeakerOutput(settings.sample_rate)
     agent = ClaudeAgent(
         anthropic.AsyncAnthropic(),

@@ -15,7 +15,8 @@ A voice agent that answers calls, talks naturally, takes actions through tools, 
 | Deepgram streaming speech-to-text (`nova-3`) + turn detection and barge-in | Done |
 | ElevenLabs streaming text-to-speech (`eleven_flash_v2_5`) with word timing | Done |
 | Voice mode on your own computer (`voice-agent --voice`) | Done, not yet tried with live keys |
-| Browser audio over WebRTC, then phone | Next |
+| Browser calls with echo cancellation (`voice-agent --web`) | Done, not yet tried with live keys |
+| Phone calls | Next |
 
 ## How a turn flows
 
@@ -41,6 +42,8 @@ The agent stream and the speaker run at the same time, so the first sentence is 
 | `src/voice_agent/providers/local_audio.py` | Microphone and speaker (16 kHz PCM) for voice mode |
 | `src/voice_agent/turns.py` | End-of-turn and barge-in detection from STT events |
 | `src/voice_agent/voice.py` | Voice mode: mic → Deepgram → Claude → ElevenLabs → speaker |
+| `src/voice_agent/web/server.py` | Browser calls: serves the page, one session per WebSocket, real-time audio pacing |
+| `src/voice_agent/web/static/index.html` | Call page: mic capture with echo cancellation, playback, transcript, latency table |
 | `src/voice_agent/providers/fake.py` | Stand-ins used by the text CLI and tests |
 | `src/voice_agent/tracing.py` | Per-turn latency and token trace |
 
@@ -71,7 +74,18 @@ agent> One moment... Your order A one zero zero one has shipped with UPS ...
 
 Type while the agent is still "talking" to interrupt it. Order IDs in the mock data: A1001 (shipped), A1002 (processing), A1003 (delivered).
 
-### Voice mode
+### Browser calls (recommended)
+
+```bash
+# set ANTHROPIC_API_KEY, DEEPGRAM_API_KEY, ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID
+voice-agent --web
+```
+
+Open http://localhost:8080 in Chrome or Edge, click **Start call**, allow the microphone, and talk. The browser's echo cancellation means speakers work. The page shows the transcript, the agent's state, and a latency row per turn (first text, first sentence, first audio, in ms after you stop talking).
+
+The page and the server talk over a WebSocket: 16 kHz 16-bit PCM both ways plus JSON events. The server binds to `127.0.0.1` by default; it has no login, so don't expose it publicly. A WebRTC media server replaces this transport for production and telephony.
+
+### Voice mode (local mic, no browser)
 
 Talk to it through your microphone. **Use headphones**: with speakers the mic hears the agent and it interrupts itself (echo cancellation comes with the WebRTC step).
 
@@ -87,7 +101,7 @@ Settings are environment variables; see [.env.example](.env.example). Defaults: 
 
 ## Next steps
 
-1. Run voice mode with live keys and record latency per stage against the 800 ms p50 budget (Gate 1).
-2. Browser audio: WebRTC media server with echo cancellation, replacing the local mic/speaker.
-3. Phone channel (telephony provider media stream, 8 kHz), human handoff, recording.
-4. Eval suite with simulated callers (Phase 1 pilot).
+1. Run browser calls with live keys and record latency per stage against the 800 ms p50 budget (Gate 1).
+2. Phone channel (telephony provider media stream, 8 kHz), human handoff, recording.
+3. Eval suite with simulated callers (Phase 1 pilot).
+4. WebRTC media server (LiveKit) for production networks.

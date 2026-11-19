@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voice Agent Call</title>
+<style>
+  :root {
+    --bg: #f7f7f5; --surface: #ffffff; --text: #1d1d1b; --muted: #66665f; --border: #e2e1dc;
+    --accent: #2f6fde; --accent-text: #ffffff; --you: #eef3fc; --agent: #f1f0ec;
+    --ok: #1f8a4c; --warn: #b26b00; --bad: #c0392b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #161615; --surface: #1f1f1d; --text: #ecebe6; --muted: #a3a29b; --border: #33332f;
+      --accent: #6d9cf0; --accent-text: #0e0e0d; --you: #1d2a40; --agent: #2a2a27;
+      --ok: #4cc27f; --warn: #e0a64a; --bad: #ef7464;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #161615; --surface: #1f1f1d; --text: #ecebe6; --muted: #a3a29b; --border: #33332f;
+    --accent: #6d9cf0; --accent-text: #0e0e0d; --you: #1d2a40; --agent: #2a2a27;
+    --ok: #4cc27f; --warn: #e0a64a; --bad: #ef7464;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  h1 { font-size: 20px; margin: 0; }
+  h2 { font-size: 15px; margin: 28px 0 8px; }
+  .hint { color: var(--muted); margin: 8px 0 16px; }
+  .badge { font-size: 13px; padding: 2px 10px; border-radius: 999px; border: 1px solid var(--border);
+           background: var(--surface); color: var(--muted); white-space: nowrap; }
+  .badge[data-state="listening"] { color: var(--ok); border-color: var(--ok); }
+  .badge[data-state="thinking"], .badge[data-state="tool_running"] { color: var(--warn); border-color: var(--warn); }
+  .badge[data-state="speaking"] { color: var(--accent); border-color: var(--accent); }
+  .controls { display: flex; gap: 8px; flex-wrap: wrap; }
+  button { font: inherit; padding: 8px 16px; border-radius: 8px; border: 1px solid var(--border);
+           background: var(--surface); color: var(--text); cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  button:disabled { opacity: 0.5; cursor: default; }
+  #log { margin-top: 20px; display: flex; flex-direction: column; gap: 8px; min-height: 80px; }
+  .line { padding: 8px 12px; border-radius: 8px; max-width: 90%; overflow-wrap: anywhere; }
+  .line.you { background: var(--you); align-self: flex-end; }
+  .line.agent { background: var(--agent); align-self: flex-start; }
+  .line.system { color: var(--muted); font-size: 13px; align-self: center; }
+  .line.error { color: var(--bad); font-size: 13px; align-self: center; }
+  .line .who { display: block; font-size: 12px; color: var(--muted); }
+  .cut { color: var(--muted); font-size: 12px; }
+  .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; font-variant-numeric: tabular-nums; }
+  th, td { padding: 6px 10px; text-align: right; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th:first-child, td:first-child, th:last-child, td:last-child { text-align: left; }
+  th { color: var(--muted); font-weight: 600; }
+  tr:last-child td { border-bottom: 0; }
+  .empty td { color: var(--muted); text-align: center; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Voice agent</h1>
+    <span id="state" class="badge" data-state="idle">idle</span>
+  </header>
+  <p class="hint">Start a call, allow the microphone, and say "Where's my order?" (try order A1001).
+    Talk over the agent to interrupt it.</p>
+  <div class="controls">
+    <button id="start" class="primary">Start call</button>
+    <button id="stop" disabled>End call</button>
+  </div>
+
+  <section id="log" aria-live="polite"></section>
+
+  <h2>Latency per turn (ms after you stop talking)</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Turn</th><th>First text</th><th>First sentence</th><th>First audio</th><th>Done</th><th>Notes</th></tr></thead>
+      <tbody id="lat"><tr class="empty"><td colspan="6">No turns yet</td></tr></tbody>
+    </table>
+  </div>
+</main>
+
+<script>
+const SR = 16000;          // wire format: 16 kHz mono 16-bit PCM
+const FRAME = 320;         // 20 ms frames to the server
+
+// Runs on the audio thread: downsample the mic to 16 kHz (box filter) and post 20 ms Int16 frames.
+const CAPTURE_WORKLET = `
+class Capture extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.ratio = sampleRate / ${SR};
+    this.acc = []; this.pos = 0;
+    this.out = new Int16Array(${FRAME}); this.n = 0;
+  }
+  emit(s) {
+    s = Math.max(-1, Math.min(1, s));
+    this.out[this.n++] = s < 0 ? s * 0x8000 : s * 0x7fff;
+    if (this.n === ${FRAME}) {
+      this.port.postMessage(this.out.buffer, [this.out.buffer]);
+      this.out = new Int16Array(${FRAME}); this.n = 0;
+    }
+  }
+  process(inputs) {
+    const ch = inputs[0] && inputs[0][0];
+    if (!ch) return true;
+    for (let i = 0; i < ch.length; i++) this.acc.push(ch[i]);
+    while (this.pos + this.ratio <= this.acc.length) {
+      const a = Math.floor(this.pos), b = Math.floor(this.pos + this.ratio);
+      let sum = 0;
+      for (let k = a; k < b; k++) sum += this.acc[k];
+      this.emit(b > a ? sum / (b - a) : this.acc[a]);
+      this.pos += this.ratio;
+    }
+    const used = Math.floor(this.pos);
+    this.acc = this.acc.slice(used); this.pos -= used;
+    return true;
+  }
+}
+registerProcessor('capture', Capture);
+`;
+
+const $ = (id) => document.getElementById(id);
+const log = $('log');
+let ws = null, ctx = null, mic = null, nextTime = 0;
+const playing = new Set();
+const agentLines = new Map();   // turn -> element
+
+function addLine(kind, text, who) {
+  const el = document.createElement('div');
+  el.className = 'line ' + kind;
+  if (who) { const w = document.createElement('span'); w.className = 'who'; w.textContent = who; el.append(w); }
+  el.append(document.createTextNode(text));
+  log.append(el);
+  el.scrollIntoView({ block: 'nearest' });
+  return el;
+}
+
+function setState(state) {
+  const badge = $('state');
+  badge.dataset.state = state;
+  badge.textContent = state.replace('_', ' ');
+}
+
+function playPcm(buffer) {
+  if (!ctx || buffer.byteLength < 2) return;
+  const pcm = new Int16Array(buffer);
+  const audio = ctx.createBuffer(1, pcm.length, SR);   // browser resamples to the device rate
+  const ch = audio.getChannelData(0);
+  for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
+  const src = ctx.createBufferSource();
+  src.buffer = audio;
+  src.connect(ctx.destination);
+  nextTime = Math.max(nextTime, ctx.currentTime + 0.03);
+  src.start(nextTime);
+  nextTime += audio.duration;
+  playing.add(src);
+  src.onended = () => playing.delete(src);
+}
+
+function clearAudio() {
+  for (const src of playing) { try { src.stop(); } catch (e) {} }
+  playing.clear();
+  nextTime = 0;
+}
+
+function addLatencyRow(t) {
+  const body = $('lat');
+  const empty = body.querySelector('.empty');
+  if (empty) empty.remove();
+  const m = t.marks_ms || {};
+  const notes = [];
+  for (const [name, ms] of t.tools || []) notes.push(`${name} ${ms}`);
+  if (t.interrupted) notes.push('interrupted');
+  if (t.usage && t.usage.input_tokens) notes.push(`cache ${t.usage.cache_read_input_tokens || 0}/${t.usage.input_tokens} tok`);
+  const row = document.createElement('tr');
+  for (const v of [t.turn, m.llm_first_text, m.first_sentence, m.first_audio, m.done, notes.join(', ')]) {
+    const td = document.createElement('td');
+    td.textContent = v === undefined ? '–' : v;
+    row.append(td);
+  }
+  body.prepend(row);
+}
+
+function onEvent(msg) {
+  switch (msg.type) {
+    case 'ready': addLine('system', 'Connected. Start talking.'); setState('listening'); break;
+    case 'state': setState(msg.state); break;
+    case 'caller': addLine('you', msg.text, 'You'); break;
+    case 'agent_text': {
+      const el = agentLines.get(msg.turn);
+      if (el) el.lastChild.textContent += ' ' + msg.text;
+      else agentLines.set(msg.turn, addLine('agent', msg.text, 'Agent'));
+      break;
+    }
+    case 'turn_done':
+      if (msg.interrupted && agentLines.has(msg.turn)) {
+        const cut = document.createElement('span'); cut.className = 'cut'; cut.textContent = '  (interrupted)';
+        agentLines.get(msg.turn).append(cut);
+      }
+      addLatencyRow(msg);
+      break;
+    case 'clear': clearAudio(); break;
+    case 'error': addLine('error', msg.message); break;
+  }
+}
+
+async function start() {
+  $('start').disabled = true;
+  try {
+    ctx = new AudioContext();
+    await ctx.resume();
+    mic = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
+    });
+    const url = URL.createObjectURL(new Blob([CAPTURE_WORKLET], { type: 'application/javascript' }));
+    await ctx.audioWorklet.addModule(url);
+    const node = new AudioWorkletNode(ctx, 'capture');
+    const mute = ctx.createGain(); mute.gain.value = 0;   // keeps the worklet running, plays nothing
+    ctx.createMediaStreamSource(mic).connect(node).connect(mute).connect(ctx.destination);
+
+    ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+    ws.binaryType = 'arraybuffer';
+    ws.onopen = () => {
+      node.port.onmessage = (e) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(e.data); };
+      $('stop').disabled = false;
+    };
+    ws.onmessage = (e) => (typeof e.data === 'string' ? onEvent(JSON.parse(e.data)) : playPcm(e.data));
+    ws.onclose = () => { if (ws) end('Call ended by the server.'); };
+  } catch (err) {
+    addLine('error', 'Could not start: ' + err.message);
+    end();
+  }
+}
+
+function end(message) {
+  const sock = ws;
+  ws = null;   // set first so onclose doesn't run end() a second time
+  if (sock && sock.readyState === WebSocket.OPEN) {
+    try { sock.send(JSON.stringify({ type: 'hangup' })); } catch (e) {}
+    sock.close();
+  }
+  clearAudio();
+  if (mic) mic.getTracks().forEach((t) => t.stop());
+  mic = null;
+  if (ctx) ctx.close();
+  ctx = null;
+  if (message) addLine('system', message);
+  setState('idle');
+  $('start').disabled = false;
+  $('stop').disabled = true;
+}
+
+$('start').onclick = start;
+$('stop').onclick = () => end('Call ended.');
+</script>
+</body>
+</html>
