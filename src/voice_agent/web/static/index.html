@@ -55,6 +55,9 @@
   th { color: var(--muted); font-weight: 600; }
   tr:last-child td { border-bottom: 0; }
   .empty td { color: var(--muted); text-align: center; }
+  .options { display: flex; align-items: center; gap: 8px; margin-top: 12px; color: var(--muted); font-size: 14px; }
+  .options[hidden] { display: none; }
+  .mode { font-size: 13px; color: var(--muted); margin-top: 8px; min-height: 20px; }
 </style>
 </head>
 <body>
@@ -64,11 +67,16 @@
     <span id="state" class="badge" data-state="idle">idle</span>
   </header>
   <p class="hint">Start a call, allow the microphone, and say "Where's my order?" (try order A1001).
-    Talk over the agent to interrupt it.</p>
+    Talk over the agent, or press Interrupt, to cut it off.</p>
   <div class="controls">
     <button id="start" class="primary">Start call</button>
+    <button id="interrupt" disabled>Interrupt</button>
     <button id="stop" disabled>End call</button>
   </div>
+  <label class="options" id="duplex-row" hidden>
+    <input type="checkbox" id="duplex"> I'm wearing headphones (let me talk over the agent)
+  </label>
+  <div class="mode" id="mode"></div>
 
   <section id="log" aria-live="polite"></section>
 
@@ -123,9 +131,11 @@ registerProcessor('capture', Capture);
 
 const $ = (id) => document.getElementById(id);
 const log = $('log');
-let ws = null, ctx = null, mic = null, nextTime = 0;
+let ws = null, ctx = null, mic = null, nextTime = 0, speech = null;
 const playing = new Set();
 const agentLines = new Map();   // turn -> element
+// Counters for debugging and the end-to-end tests.
+const stats = window.__voiceStats = { micBytes: 0, audioBytes: 0, linesSpoken: 0, sttSent: 0 };
 
 function addLine(kind, text, who) {
   const el = document.createElement('div');
@@ -143,8 +153,14 @@ function setState(state) {
   badge.textContent = state.replace('_', ' ');
 }
 
+function send(obj) {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+}
+
+// ---- Server speech mode: raw PCM both ways ---------------------------------
 function playPcm(buffer) {
   if (!ctx || buffer.byteLength < 2) return;
+  stats.audioBytes += buffer.byteLength;
   const pcm = new Int16Array(buffer);
   const audio = ctx.createBuffer(1, pcm.length, SR);   // browser resamples to the device rate
   const ch = audio.getChannelData(0);
@@ -165,6 +181,105 @@ function clearAudio() {
   nextTime = 0;
 }
 
+async function startMicCapture() {
+  mic = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
+  });
+  const url = URL.createObjectURL(new Blob([CAPTURE_WORKLET], { type: 'application/javascript' }));
+  await ctx.audioWorklet.addModule(url);
+  const node = new AudioWorkletNode(ctx, 'capture');
+  const mute = ctx.createGain(); mute.gain.value = 0;   // keeps the worklet running, plays nothing
+  ctx.createMediaStreamSource(mic).connect(node).connect(mute).connect(ctx.destination);
+  node.port.onmessage = (e) => {
+    if (ws && ws.readyState === WebSocket.OPEN) { ws.send(e.data); stats.micBytes += e.data.byteLength; }
+  };
+}
+
+// ---- Browser speech mode: Web Speech API, text over the socket ---------------
+class BrowserSpeech {
+  constructor() {
+    const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!Recognition || !window.speechSynthesis) {
+      throw new Error('this browser has no built-in speech recognition. Use Chrome or Edge, ' +
+                      'or set the Deepgram and ElevenLabs keys on the server.');
+    }
+    this.active = true;
+    this.speaking = 0;          // lines queued or playing
+    this.quietAfter = 0;        // ignore the mic until this time (echo tail)
+    this.generation = 0;        // bumped on clear, so cancelled lines aren't reported as spoken
+    this.voice = null;
+    const pickVoice = () => {
+      const voices = speechSynthesis.getVoices();
+      this.voice = voices.find((v) => v.lang === 'en-US' && v.localService) ||
+                   voices.find((v) => v.lang && v.lang.startsWith('en')) || null;
+    };
+    pickVoice();
+    speechSynthesis.onvoiceschanged = pickVoice;
+
+    const rec = this.rec = new Recognition();
+    rec.lang = 'en-US';
+    rec.continuous = true;
+    rec.interimResults = true;
+    rec.onresult = (e) => this.onResult(e);
+    rec.onerror = (e) => {
+      if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+        addLine('error', 'Microphone or speech recognition was blocked. Allow it and try again.');
+        end();
+      } else if (e.error !== 'no-speech' && e.error !== 'aborted') {
+        addLine('error', 'Speech recognition: ' + e.error);
+      }
+    };
+    rec.onend = () => { if (this.active) { try { rec.start(); } catch (err) {} } };  // keeps listening
+    rec.start();
+  }
+
+  muted() {
+    if ($('duplex').checked) return false;
+    return this.speaking > 0 || performance.now() < this.quietAfter;
+  }
+
+  onResult(e) {
+    if (this.muted()) return;   // the mic would hear the agent's own voice through the speakers
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const r = e.results[i];
+      const text = r[0].transcript.trim();
+      if (!text) continue;
+      send({ type: 'stt', text, is_final: r.isFinal, speech_final: r.isFinal });
+      stats.sttSent += 1;
+    }
+  }
+
+  speak(id, text) {
+    const gen = this.generation;
+    const u = new SpeechSynthesisUtterance(text);
+    if (this.voice) u.voice = this.voice;
+    u.rate = 1.05;
+    this.speaking += 1;
+    const finish = (ok) => {
+      this.speaking = Math.max(0, this.speaking - 1);
+      if (this.speaking === 0) this.quietAfter = performance.now() + 400;
+      if (ok && gen === this.generation) { send({ type: 'spoken', id }); stats.linesSpoken += 1; }
+    };
+    u.onend = () => finish(true);
+    u.onerror = () => finish(false);
+    speechSynthesis.speak(u);
+  }
+
+  clear() {
+    this.generation += 1;
+    this.speaking = 0;
+    this.quietAfter = performance.now() + 250;
+    speechSynthesis.cancel();
+  }
+
+  close() {
+    this.active = false;
+    this.clear();
+    try { this.rec.abort(); } catch (e) {}
+  }
+}
+
+// ---- Shared ----------------------------------------------------------------
 function addLatencyRow(t) {
   const body = $('lat');
   const empty = body.querySelector('.empty');
@@ -183,9 +298,28 @@ function addLatencyRow(t) {
   body.prepend(row);
 }
 
+async function onReady(msg) {
+  try {
+    if (msg.speech === 'browser') {
+      speech = new BrowserSpeech();
+      $('duplex-row').hidden = false;
+      $('mode').textContent = 'Speech: your browser (recognition + voice) · Agent: Claude';
+    } else {
+      await startMicCapture();
+      $('mode').textContent = 'Speech: server (Deepgram + ElevenLabs) · Agent: Claude';
+    }
+    addLine('system', 'Connected. Start talking.');
+    setState('listening');
+    $('interrupt').disabled = false;
+  } catch (err) {
+    addLine('error', 'Could not start: ' + err.message);
+    end();
+  }
+}
+
 function onEvent(msg) {
   switch (msg.type) {
-    case 'ready': addLine('system', 'Connected. Start talking.'); setState('listening'); break;
+    case 'ready': onReady(msg); break;
     case 'state': setState(msg.state); break;
     case 'caller': addLine('you', msg.text, 'You'); break;
     case 'agent_text': {
@@ -194,6 +328,7 @@ function onEvent(msg) {
       else agentLines.set(msg.turn, addLine('agent', msg.text, 'Agent'));
       break;
     }
+    case 'speak': if (speech) speech.speak(msg.id, msg.text); break;
     case 'turn_done':
       if (msg.interrupted && agentLines.has(msg.turn)) {
         const cut = document.createElement('span'); cut.className = 'cut'; cut.textContent = '  (interrupted)';
@@ -201,37 +336,32 @@ function onEvent(msg) {
       }
       addLatencyRow(msg);
       break;
-    case 'clear': clearAudio(); break;
+    case 'clear': clearAudio(); if (speech) speech.clear(); break;
     case 'error': addLine('error', msg.message); break;
   }
 }
 
-async function start() {
+function start() {
   $('start').disabled = true;
   try {
-    ctx = new AudioContext();
-    await ctx.resume();
-    mic = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
-    });
-    const url = URL.createObjectURL(new Blob([CAPTURE_WORKLET], { type: 'application/javascript' }));
-    await ctx.audioWorklet.addModule(url);
-    const node = new AudioWorkletNode(ctx, 'capture');
-    const mute = ctx.createGain(); mute.gain.value = 0;   // keeps the worklet running, plays nothing
-    ctx.createMediaStreamSource(mic).connect(node).connect(mute).connect(ctx.destination);
-
+    ctx = new AudioContext();   // created inside the click so audio may play
+    ctx.resume();
     ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
     ws.binaryType = 'arraybuffer';
-    ws.onopen = () => {
-      node.port.onmessage = (e) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(e.data); };
-      $('stop').disabled = false;
-    };
+    ws.onopen = () => { $('stop').disabled = false; };
     ws.onmessage = (e) => (typeof e.data === 'string' ? onEvent(JSON.parse(e.data)) : playPcm(e.data));
     ws.onclose = () => { if (ws) end('Call ended by the server.'); };
+    ws.onerror = () => { if (ws) addLine('error', 'Connection to the server failed.'); };
   } catch (err) {
     addLine('error', 'Could not start: ' + err.message);
     end();
   }
+}
+
+function interrupt() {
+  if (speech) speech.clear();   // stop talking now; the server confirms with "clear"
+  clearAudio();
+  send({ type: 'barge_in' });
 }
 
 function end(message) {
@@ -241,6 +371,8 @@ function end(message) {
     try { sock.send(JSON.stringify({ type: 'hangup' })); } catch (e) {}
     sock.close();
   }
+  if (speech) speech.close();
+  speech = null;
   clearAudio();
   if (mic) mic.getTracks().forEach((t) => t.stop());
   mic = null;
@@ -250,9 +382,13 @@ function end(message) {
   setState('idle');
   $('start').disabled = false;
   $('stop').disabled = true;
+  $('interrupt').disabled = true;
+  $('duplex-row').hidden = true;
+  $('mode').textContent = '';
 }
 
 $('start').onclick = start;
+$('interrupt').onclick = interrupt;
 $('stop').onclick = () => end('Call ended.');
 </script>
 </body>

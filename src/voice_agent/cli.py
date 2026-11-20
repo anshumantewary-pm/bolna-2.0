@@ -74,7 +74,7 @@ def main() -> None:
     mode.add_argument(
         "--web",
         action="store_true",
-        help="serve browser calls at http://localhost:PORT (Deepgram STT + ElevenLabs TTS)",
+        help="serve browser calls at http://localhost:PORT",
     )
     mode.add_argument(
         "--voice",
@@ -83,14 +83,26 @@ def main() -> None:
     )
     parser.add_argument("--host", default="127.0.0.1", help="web mode bind address")
     parser.add_argument("--port", type=int, default=8080, help="web mode port")
+    parser.add_argument(
+        "--speech",
+        choices=["auto", "server", "browser"],
+        default="auto",
+        help=(
+            "web mode speech: 'server' = Deepgram + ElevenLabs, 'browser' = the browser's own "
+            "speech recognition and voice (only a Claude key needed), 'auto' = server if its "
+            "keys are set, else browser (default)"
+        ),
+    )
     args = parser.parse_args()
 
     if args.web or args.voice:
-        from .voice import missing_env, run_voice, run_web
+        from .voice import missing_env, resolve_speech, run_voice, run_web
 
-        if missing := missing_env():
-            sys.exit(f"Voice needs these environment variables: {', '.join(missing)}")
-        target = (lambda: run_web(args.host, args.port)) if args.web else run_voice
+        needs_vendors = args.voice or resolve_speech(args.speech) == "server"
+        if needs_vendors and (missing := missing_env()):
+            hint = " (or use --web --speech browser)" if args.web else ""
+            sys.exit(f"Voice needs these environment variables: {', '.join(missing)}{hint}")
+        target = (lambda: run_web(args.host, args.port, args.speech)) if args.web else run_voice
     else:
         target = run
     try:

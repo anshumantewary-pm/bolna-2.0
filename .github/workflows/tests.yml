@@ -12,5 +12,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -e ".[dev]"
+      - run: pip install -e ".[dev,e2e]"
+      # Headless Chromium for the real-browser end-to-end tests.
+      - run: playwright install --with-deps chromium
       - run: pytest -q

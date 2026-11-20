@@ -2,9 +2,14 @@
 
 Protocol on ``/ws``:
 - browser -> server: binary = 16 kHz mono 16-bit PCM microphone frames (20 ms);
-  text = JSON control (``{"type": "hangup"}``).
+  text = JSON control (``{"type": "hangup"}``, ``{"type": "barge_in"}``).
 - server -> browser: binary = 16 kHz mono 16-bit PCM agent audio; text = JSON events
   (``ready``, ``state``, ``caller``, ``agent_text``, ``turn_done``, ``clear``, ``error``).
+
+Two speech modes, chosen per server and announced in ``ready``:
+- ``server``: Deepgram and ElevenLabs run on the server; audio crosses the socket.
+- ``browser``: the browser's own speech recognition and voice are used and only
+  text crosses the socket (see ``browser_speech.py``). Needs only Claude credentials.
 
 The browser applies echo cancellation and noise suppression to the microphone, so
 speakers work. A WebRTC media server (PRD section 6) replaces this transport for
@@ -28,6 +33,7 @@ from ..config import Settings
 from ..providers.base import AudioChunk, SpeechToText, TextToSpeech
 from ..session import VoiceSession
 from ..voice import drive_session
+from .browser_speech import BrowserSpeechOutput, BrowserSpeechTTS, BrowserSTT
 
 Outgoing = bytes | dict[str, Any]
 
@@ -65,23 +71,45 @@ class BrowserAudioOutput:
         self.outbox.put_nowait({"type": "clear"})  # browser drops audio it has queued
 
 
+SPEECH_MODES = ("server", "browser")
+
+
 @dataclass
 class CallDeps:
     settings: Settings
     make_agent: Callable[[], ConversationAgent]
-    make_stt: Callable[[], SpeechToText]
-    make_tts: Callable[[], TextToSpeech]
+    # Only used in "server" speech mode.
+    make_stt: Callable[[], SpeechToText] | None = None
+    make_tts: Callable[[], TextToSpeech] | None = None
+    speech: str = "server"
+
+    def __post_init__(self) -> None:
+        if self.speech not in SPEECH_MODES:
+            raise ValueError(f"speech must be one of {SPEECH_MODES}, not {self.speech!r}")
+        if self.speech == "server" and (self.make_stt is None or self.make_tts is None):
+            raise ValueError("server speech mode needs make_stt and make_tts")
 
 
 async def handle_call(ws: Any, deps: CallDeps) -> None:
     """Run one browser call until the caller hangs up or disconnects."""
     outbox: asyncio.Queue[Outgoing] = asyncio.Queue()
     mic: asyncio.Queue[bytes | None] = asyncio.Queue()
-    tts = deps.make_tts()
+    browser_stt: BrowserSTT | None = None
+    speech_out: BrowserSpeechOutput | None = None
+    if deps.speech == "browser":
+        browser_stt = BrowserSTT()
+        speech_out = BrowserSpeechOutput(outbox)
+        stt: SpeechToText = browser_stt
+        tts: TextToSpeech = BrowserSpeechTTS()
+        output: Any = speech_out
+    else:
+        assert deps.make_stt is not None and deps.make_tts is not None
+        stt, tts = deps.make_stt(), deps.make_tts()
+        output = BrowserAudioOutput(outbox, deps.settings.sample_rate)
     session = VoiceSession(
         deps.make_agent(),
         tts,
-        BrowserAudioOutput(outbox, deps.settings.sample_rate),
+        output,
         deps.settings,
         listener=lambda event, data: outbox.put_nowait({"type": event, **data}),
     )
@@ -100,19 +128,33 @@ async def handle_call(ws: Any, deps: CallDeps) -> None:
             async for message in ws:
                 if isinstance(message, bytes):
                     mic.put_nowait(message)
-                elif json.loads(message).get("type") == "hangup":
+                    continue
+                try:
+                    control = json.loads(message)
+                except ValueError:
+                    continue
+                kind = control.get("type") if isinstance(control, dict) else None
+                if kind == "hangup":
                     break
+                if kind == "barge_in":
+                    await session.interrupt()
+                elif kind == "stt" and browser_stt is not None:
+                    browser_stt.feed(control)
+                elif kind == "spoken" and speech_out is not None:
+                    speech_out.spoken(control.get("id"))
         finally:
             mic.put_nowait(None)
+            if browser_stt is not None:
+                browser_stt.close()
 
     async def converse() -> None:
         await drive_session(
             session,
-            deps.make_stt().transcribe(frames()),
+            stt.transcribe(frames()),
             lambda text: outbox.put_nowait({"type": "caller", "text": text}),
         )
 
-    outbox.put_nowait({"type": "ready", "sample_rate": deps.settings.sample_rate})
+    outbox.put_nowait({"type": "ready", "sample_rate": deps.settings.sample_rate, "speech": deps.speech})
     sender = asyncio.create_task(send_loop())
     tasks = [asyncio.create_task(receive_loop()), asyncio.create_task(converse())]
     try:

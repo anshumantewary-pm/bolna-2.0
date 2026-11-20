@@ -1,6 +1,6 @@
 """Voice mode: microphone -> Deepgram -> Claude agent -> ElevenLabs -> speakers.
 
-Run with ``voice-agent --voice``. Needs DEEPGRAM_API_KEY, ELEVENLABS_API_KEY,
+Run with ``voice-agent --voice`` (local mic) or ``voice-agent --web`` (browser). Needs DEEPGRAM_API_KEY, ELEVENLABS_API_KEY,
 ELEVENLABS_VOICE_ID and Claude credentials. Use headphones.
 """
 
@@ -64,27 +64,42 @@ def make_tts(settings: Settings) -> ElevenLabsTTS:
     )
 
 
-async def run_web(host: str, port: int) -> None:
+def resolve_speech(requested: str) -> str:
+    """'auto' picks server speech when every vendor key is set, else browser speech."""
+    if requested == "auto":
+        return "browser" if missing_env() else "server"
+    return requested
+
+
+async def run_web(host: str, port: int, speech: str = "auto") -> None:
     """Serve browser calls: open http://localhost:<port> and click Start call."""
     import anthropic
 
     from .web import CallDeps, serve_calls
 
     settings = Settings.from_env()
-    make_tts(settings)  # fail fast on a missing voice ID
+    speech = resolve_speech(speech)
     client = anthropic.AsyncAnthropic()
-    deps = CallDeps(
-        settings=settings,
-        make_agent=lambda: ClaudeAgent(
-            client, ToolRegistry([lookup_order], timeout_s=settings.tool_timeout_s), settings
-        ),
-        make_stt=lambda: make_stt(settings),
-        make_tts=lambda: make_tts(settings),
-    )
+
+    def make_agent() -> ClaudeAgent:
+        return ClaudeAgent(client, ToolRegistry([lookup_order], timeout_s=settings.tool_timeout_s), settings)
+
+    if speech == "server":
+        make_tts(settings)  # fail fast on a missing voice ID
+        deps = CallDeps(
+            settings=settings,
+            make_agent=make_agent,
+            make_stt=lambda: make_stt(settings),
+            make_tts=lambda: make_tts(settings),
+        )
+        stack = f"STT {settings.deepgram_model} | LLM {settings.model} | TTS {settings.elevenlabs_model}"
+    else:
+        deps = CallDeps(settings=settings, make_agent=make_agent, speech="browser")
+        stack = f"STT + TTS in the browser (Chrome/Edge) | LLM {settings.model}"
     async with serve_calls(deps, host, port) as server:
         shown = "localhost" if host in ("127.0.0.1", "0.0.0.0") else host
         print(f"Open http://{shown}:{port} and click Start call. Ctrl+C to stop.")
-        print(f"STT {settings.deepgram_model} | LLM {settings.model} | TTS {settings.elevenlabs_model}")
+        print(stack)
         await server.serve_forever()
 
 
