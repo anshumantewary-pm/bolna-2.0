@@ -1,6 +1,26 @@
-# bolna-2.0 — real-time voice AI agent
+# bolna-2.0: real-time voice AI agent
 
-A voice agent that answers calls, talks naturally, takes actions through tools, and hands off to a human when it should. Product requirements, system design and architecture: [docs/PRD.md](docs/PRD.md).
+A prototype voice agent that holds a natural spoken conversation and takes actions through tools, with human handoff and phone calls on the roadmap. It is built for customer-support and scheduling use cases where callers should hear the first word of a reply within 800 ms of finishing their sentence. Product requirements, system design and architecture: [docs/PRD.md](docs/PRD.md).
+
+> This is an independent project. It is not a fork of, and does not use code from, the open-source Bolna voice-AI framework.
+
+## Features
+
+- Streaming pipeline: speech-to-text, LLM agent loop with tools, then text-to-speech, with the first sentence spoken while the rest is still being generated
+- Barge-in: the caller can interrupt; audio stops and the next turn knows what the caller actually heard
+- Filler line ("One moment...") when a tool is slow, plus hard per-tool timeouts
+- Tool gateway with schema validation and errors returned to the model; sample `lookup_order` tool on mock data
+- Per-turn latency trace (time to first text, first sentence, first audio) and token counts
+- Three ways to try it: text CLI, local microphone voice mode, and browser calls with echo cancellation
+
+## Tech stack
+
+- Python 3.11+, packaged with setuptools (`pyproject.toml`)
+- [Anthropic Python SDK](https://pypi.org/project/anthropic/) (Claude Messages API) for the agent loop
+- Deepgram live speech-to-text (`nova-3`) over WebSocket
+- ElevenLabs streaming text-to-speech (`eleven_flash_v2_5`)
+- `httpx`, `websockets`; optional `sounddevice` for local audio
+- `pytest` with GitHub Actions CI ([.github/workflows/tests.yml](.github/workflows/tests.yml))
 
 ## Status: Phase 0 (prototype)
 
@@ -47,7 +67,7 @@ The agent stream and the speaker run at the same time, so the first sentence is 
 | `src/voice_agent/providers/fake.py` | Stand-ins used by the text CLI and tests |
 | `src/voice_agent/tracing.py` | Per-turn latency and token trace |
 
-## Run it
+## Getting started
 
 Requires Python 3.11+.
 
@@ -99,9 +119,46 @@ Speak normally; when you pause (~300 ms) the turn ends and the agent answers. Ta
 
 Settings are environment variables; see [.env.example](.env.example). Defaults: `claude-opus-5-5`, effort `low`, fast mode off, refusal fallbacks on, Deepgram `nova-3`, ElevenLabs `eleven_flash_v2_5`.
 
-## Next steps
+### Environment variables
+
+Copy [.env.example](.env.example) to `.env` and fill in your own values. Variable names:
+
+| Variable | Purpose |
+| --- | --- |
+| `ANTHROPIC_API_KEY` | LLM credentials (or run `ant auth login` once) |
+| `VOICE_AGENT_MODEL`, `VOICE_AGENT_EFFORT`, `VOICE_AGENT_FAST`, `VOICE_AGENT_FALLBACKS` | Model and speed settings |
+| `DEEPGRAM_API_KEY`, `DEEPGRAM_MODEL` | Speech-to-text |
+| `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID`, `ELEVENLABS_MODEL` | Text-to-speech |
+| `VOICE_AGENT_FILLER_AFTER_S`, `VOICE_AGENT_TOOL_TIMEOUT_S` | Tool filler delay and timeout (seconds) |
+
+## Project structure
+
+```text
+.
+├── docs/PRD.md              # requirements, system design, architecture
+├── src/voice_agent/
+│   ├── agent/               # agent loop, prompts, events
+│   ├── providers/           # STT, TTS and audio adapters (Deepgram, ElevenLabs, local, fakes)
+│   ├── tools/               # tool gateway and lookup_order
+│   ├── web/                 # browser-call server and static call page
+│   ├── session.py           # per-call session actor
+│   ├── turns.py, chunker.py, voice.py, tracing.py, config.py, cli.py
+├── tests/                   # offline pytest suite
+├── .env.example
+└── pyproject.toml
+```
+
+## Roadmap
 
 1. Run browser calls with live keys and record latency per stage against the 800 ms p50 budget (Gate 1).
 2. Phone channel (telephony provider media stream, 8 kHz), human handoff, recording.
 3. Eval suite with simulated callers (Phase 1 pilot).
 4. WebRTC media server (LiveKit) for production networks.
+
+## License
+
+[Apache License 2.0](LICENSE)
+
+---
+
+Anshuman Tewary · [GitHub](https://github.com/anshumantewary-pm) · [LinkedIn](https://www.linkedin.com/in/tewary-anshuman/)
